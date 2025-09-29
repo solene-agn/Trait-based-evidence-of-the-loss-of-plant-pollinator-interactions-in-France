@@ -1,0 +1,30 @@
+Metadata
+
+Appendix_7_Dataset_for_community_analysis:
+Species: name of the species
+Abundance: the number of quadrats in plot P_name in which the species has been observed
+ID: ID of the survey
+S_name: name of the square
+P_name: name of the plot
+Long_square: longitude of the square
+Lat_square: latitude of the square
+Long_plot: longitude of the plot
+Lat_plot: latitude of the plot
+corineType: habitat type
+Year: year of the observation
+perc_insect_dep: percentage of dependence on insect pollinators of the species
+perc_wind_dep: percentage of dependence on wind
+Pollination: main pollination vector of the species
+
+Appendix_10_Dataset_for_species_analysis:
+Species: name of the species
+EstimateLogit: estimated temporal trend in abundance
+Std.errorLogit: standard error of the estimated temporal trend
+Presence: number of presence records of the species in the dataset
+Total: number of presence and absence (abundance=0) records of the species in the dataset
+Flower_colour: flower colour of the species
+Flower_shape: flower shape of the species
+Nectar_qty: quantity of nectar produced by the species
+Perc_insect_dep: percentage of dependence on insect pollinators of the species
+Perc_wind_dep: percentage of dependence on wind
+Pollination: main pollination vector of the species

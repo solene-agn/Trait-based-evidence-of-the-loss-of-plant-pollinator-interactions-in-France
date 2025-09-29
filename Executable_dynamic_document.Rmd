@@ -1,0 +1,1854 @@
+---
+title: 'Janzen was right: trait-based analysis reveals indirect evidence for the loss
+  of plant-pollinator interactions in France'
+output:
+  pdf_document:
+    latex_engine: xelatex
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      eval = TRUE,
+                      fig.align = "center",
+                      fig.width = 8,
+                      fig.height = 6, 
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+```{r packages_utilises}
+# List of packages used
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(ggrepel)
+library(ggpubr)
+library(gridExtra)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(glmmTMB)
+library(car)
+library(emmeans)
+library(performance)
+library(knitr)
+library(PCAmixdata)
+library(colorBlindness)
+library(ggforce)
+library(gt)
+library(gtExtras)
+library(purrr)
+library(broom)
+library(kableExtra)
+library(openxlsx)
+library(emmeans)
+library(multcomp)
+library(ggstatsplot)
+library(showtext)
+showtext_auto()
+```
+
+# Insect-pollinated and wind-pollinated species richness in plant communities
+
+```{r community data importation, echo=FALSE, include=FALSE}
+data <- data.table::fread("data/Appendix_7_Dataset_for_community_analysis.csv", sep=";")
+```
+
+## General information
+
+<p style="text-align:justify;">
+
+Pollinator and wind dependencies are available for
+
+```{r dep_poll information, echo=FALSE, include=TRUE}
+length(unique(data$Species[!is.na(data$perc_insect_dep)]))
+```
+
+species out of the
+
+```{r total number of species, echo=FALSE, include=TRUE}
+length(unique(data$Species))
+```
+
+Angiosperm species in the dataset, representing
+
+```{r percentage, include=TRUE}
+round((100*length(data$Species[!is.na(data$perc_insect_dep)]))/nrow(data),1)
+```
+
+\% of the observations.
+
+</p>
+
+
+```{r Appendix 5}
+# To plot the percentage of dependence on insect and 
+# the percentage of dependence on wind on the same plot
+sp_vect_poll <- dplyr::distinct(data, Species, .keep_all=TRUE)
+
+sp_vect_poll_insect <- sp_vect_poll[,c("Species","perc_insect_dep")]
+sp_vect_poll_insect$Vector <- "Insect"
+names(sp_vect_poll_insect) <- c("Species", "Percentage", "Vector")
+
+sp_vect_poll_wind <- sp_vect_poll[,c("Species","perc_wind_dep")]
+sp_vect_poll_wind$Vector <- "Wind"
+names(sp_vect_poll_wind) <- c("Species", "Percentage", "Vector")
+
+sp_vect_poll_tot <- rbind(sp_vect_poll_insect, sp_vect_poll_wind)
+
+# Plot
+p <- sp_vect_poll_tot %>%
+  ggplot( aes(x=Percentage, fill=Vector)) +
+  geom_histogram( color="#e9ecef", alpha=0.4, position = 'identity') +
+  scale_fill_manual(values=c("#6a84c8", "#c3c86a")) +
+  theme_minimal() +
+  theme(axis.title.x=element_text(size=14),
+        axis.title.y=element_text(size=14),
+        axis.text.x=element_text(size=12),
+        axis.text.y=element_text(size=12),
+        egend.text = element_text(size=10)) +
+  labs(fill="") +
+  xlab("Percentage of dependence") +
+  ylab("Number of species")
+```
+
+```{r Appendix 5 plot, results="markup"}
+p
+```
+
+<p style="text-align:justify;">
+
+Distribution of the percentage of dependence on insects (in blue) and on wind (in green) for the pollination of the 1,865 species of Angiosperms (Appendix 5).
+
+</p>
+
+## Statistical analyses
+
+```{r Data preparation for community analyses}
+# Data prepatation for community analyses
+
+# We stock the list of all the 12 663 surveys
+# one survey = all observations of plant speices
+# on a given plot, for a given year
+
+surveys <- dplyr::distinct(data[,c("ID" ,"Year", "corineType", "Lat_plot", 
+                                   "Long_plot", "P_name", "S_name")], ID, 
+                           .keep_all=TRUE) 
+
+# First, we process the surveys whose total species richess is equal to zero:
+Zero_richness <- data %>% # cases where the species richness was zero
+  group_by(ID) %>% # for each survey 
+  summarise(
+    Total_abund = sum(Abundance), # we sum the abundances
+    Total_richness = n(), # we count the number of species
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Total_richness = if_else(Total_abund == 0, 0, Total_richness) # if the total
+    # abundance is equal to zero, the total richness is zero too
+    
+  )
+
+# 972 surveys have a total richness of 0
+Zero_richness <- subset(Zero_richness, Zero_richness$Total_richness==0) 
+Zero_richness$Wind_pollinated <- 0
+Zero_richness$Insect_pollinated <- 0
+Zero_richness$Other <- 0
+Zero_richness <- Zero_richness[,c("ID", "Wind_pollinated", "Insect_pollinated", 
+                                  "Other", "Total_richness")]
+
+# Then, cases where the total richness is
+# different from 0:
+Non_zero_richness <- subset(data, data$Abundance!=0)
+Richness <- Non_zero_richness %>%
+  group_by(ID) %>%
+  summarise(
+    Wind_pollinated = sum(Pollination == "Wind-pollinated", na.rm = TRUE),
+    Insect_pollinated = sum(Pollination == "Insect-pollinated", na.rm = TRUE),
+    Other = sum(Pollination == "Other", na.rm = TRUE),
+    Total_richness = n(),
+    .groups = "drop"
+  )
+
+Total_richness <- rbind(Richness, Zero_richness) 
+length(unique(Total_richness$ID)) # The 12,663 surveys are still there
+
+surveys <- merge(surveys, Total_richness, by="ID")
+
+# We add and scale variables for analyses
+surveys$Fact_year <- as.factor(surveys$Year)
+
+surveys$Sc_year<- scale(surveys$Year)
+surveys$Sc_long_plot <- scale(surveys$Long_plot)
+surveys$Sc_lat_plot <- scale(surveys$Lat_plot)
+
+# We specify the survey corrSpeciesonding to wastelands
+surveys[is.na(surveys$corineType)] <- "NA"
+ruderal <- subset(surveys, surveys$corineType=="ruderal")
+detail_plot <- read.csv("data/Plot_information.csv", sep=";")
+ruderal_surveys <- merge(ruderal, detail_plot, 
+                         by=c("P_name", "Year", "corineType"), 
+                         all.x=TRUE, all.y=FALSE)
+ruderal_surveys <- dplyr::distinct(ruderal_surveys, .keep_all=TRUE)
+table(ruderal_surveys$corine2)
+wastelands <- subset(ruderal_surveys, ruderal_surveys$corine2==87)
+surveys$corineType[surveys$ID %in% wastelands$ID] <- "friche"
+
+# We translate the corineType names
+corineType_name <- data.table::fread("data/corineType_names.csv", sep=";")
+surveys <- merge(surveys, corineType_name, by="corineType", 
+                 all.x=TRUE, all.y=FALSE)
+
+# Habitats corrSpeciesonding to more than 100 plots
+plot_repartition <- dplyr::distinct(surveys, P_name, .keep_all=TRUE)
+plot_repartition <- as.data.frame(
+  table(corineType=plot_repartition$corineType_engl))
+list_habitat <- 
+  plot_repartition$corineType[plot_repartition$Freq>100 
+                              & !plot_repartition$corineType %in% c("Unknown", "ruderal")]
+
+# Model for each habitat
+
+# Bolker's function to test overdispersion
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp <- residuals(model,type="pearson")
+  Pearson.chisq <- sum(rp^2)
+  prat <- Pearson.chisq/rdf
+  pval <- pchisq(Pearson.chisq, df=rdf, lower.tail=FALSE)
+  c(chisq=Pearson.chisq,ratio=prat,rdf=rdf,p=pval)
+}
+
+# Loop to stock model outputs of each habitat
+for (h in list_habitat){
+  
+  habitat <- surveys[surveys$corineType_engl==h,]
+  
+  habitat$Sc_year <- scale(habitat$Year)
+  habitat$Sc_long_plot <- scale(habitat$Long_plot)
+  habitat$Sc_lat_plot <- scale(habitat$Lat_plot)
+  
+  model_insect <- glmmTMB(Insect_pollinated~Sc_year + Sc_lat_plot + 
+                            Sc_long_plot + (1|S_name/P_name), 
+                          habitat, family=poisson)
+  sum_model_insect <- summary(model_insect)
+  overdisp_fun(model_insect)
+  Anova(model_insect)
+  
+  info_insect <- data.frame(Habitat=h,
+                Nb_surveys=nrow(habitat),
+                Pollination="Insect_pollinated",
+                            
+                Effects=row.names(sum_model_insect[["coefficients"]][["cond"]]),
+                Estimates=sum_model_insect[["coefficients"]][["cond"]][,"Estimate"],
+                Std_error=sum_model_insect[["coefficients"]][["cond"]][,"Std. Error"],
+                            
+                Anova_effet=c("(Intercept)", row.names(Anova(model_insect)["Chisq"])),
+                Anova_Chisq=c("(Intercept)", Anova(model_insect)["Chisq"][,1]),
+                Anova_p=c("(Intercept)", Anova(model_insect)["Pr(>Chisq)"][,1]),
+                            
+                r2_condi=r2_nakagawa(model_insect)$R2_conditional,
+                r2_marg=r2_nakagawa(model_insect)$R2_marginal,
+                            
+                Ovd.ratio=overdisp_fun(model_insect)["ratio"],
+                Ovd.p=overdisp_fun(model_insect)["p"]
+                            )
+  
+  model_wind<- glmmTMB(Wind_pollinated~Sc_year + Sc_lat_plot + Sc_long_plot + 
+                         (1|S_name/P_name), habitat, family=poisson)
+  sum_model_wind <- summary(model_wind)
+  overdisp_fun(model_wind)
+  Anova(model_wind)
+  
+  info_wind <- data.frame(Habitat=h,
+               Nb_surveys=nrow(habitat),
+               Pollination="Wind_pollinated",
+                            
+               Effects=row.names(sum_model_wind[["coefficients"]][["cond"]]),
+               Estimates=sum_model_wind[["coefficients"]][["cond"]][,"Estimate"],
+               Std_error=sum_model_wind[["coefficients"]][["cond"]][,"Std. Error"],
+                            
+               Anova_effet=c("(Intercept)", row.names(Anova(model_wind)["Chisq"])),
+               Anova_Chisq=c("(Intercept)", Anova(model_wind)["Chisq"][,1]),
+               Anova_p=c("(Intercept)", Anova(model_wind)["Pr(>Chisq)"][,1]),
+                          
+               r2_condi=r2_nakagawa(model_wind)$R2_conditional,
+               r2_marg=r2_nakagawa(model_wind)$R2_marginal,
+                            
+               Ovd.ratio=overdisp_fun(model_wind)["ratio"],
+               Ovd.p=overdisp_fun(model_wind)["p"]
+  )
+  
+  info_habitat <- rbind(info_insect, info_wind)
+  
+  if(h==list_habitat[1]) { Info_total <- info_habitat} 
+  else {Info_total <- rbind(Info_total, info_habitat)}
+}
+
+# To format the table
+  # We select the temporal trend
+  Info_total_table <- Info_total[Info_total$Effects=="Sc_year",]
+  Info_total_table$Anova_Chisq <- 
+    as.numeric(as.character(Info_total_table$Anova_Chisq))
+  Info_total_table$Anova_p <- as.numeric(as.character(Info_total_table$Anova_p))
+  # We round numerical variable to 3 decimals
+  Info_total_table[] <- 
+    lapply(Info_total_table, function(x) if (is.numeric(x)) round(x, 3) else x) 
+  Info_total_table[,c("Effects", "Anova_effet", "Ovd.ratio", "Ovd.p")] <- NULL
+  rownames(Info_total_table) <- NULL
+```
+
+```{r Table community richness, echo=TRUE, include="TRUE"}
+kable(Info_total_table, booktable=TRUE, 
+      caption = "Temporal trends in species richness of predominantly insect-pollinated species and wind-pollinated species, nationwide and across different habitat types, and type II Anova results.")
+```
+
+```{r Model and plot for total habitat, echo=TRUE}
+
+# Model and plot for total habitat
+Emmeans <- function(habitat, title){
+  
+
+  habitat_h <- surveys
+  
+  habitat_h$Sc_long_plot <- scale(habitat_h$Long_plot)
+  habitat_h$Sc_lat_plot <- scale(habitat_h$Lat_plot)
+  habitat_h$Sc_year <- scale(habitat_h$Year)
+  
+  # Number of plots per year
+  nb_plots <- data.frame(table(habitat_h$Year))
+  names(nb_plots)[1] <- "Year"
+  habitat_h <- merge(habitat_h, nb_plots, by.x="Fact_year" ,by.y="Year", all.x=TRUE, all.y=FALSE)
+  
+  # wind
+  general_model_wind <- 
+    glmmTMB(Wind_pollinated~Fact_year + Sc_lat_plot + Sc_long_plot 
+            + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_result_wind <- emmeans(general_model_wind, ~ Fact_year)
+  emmeans_df_wind <- as.data.frame(emmeans_result_wind)
+  
+  emmeans_df_wind$emmean_exp <- exp(emmeans_df_wind$emmean)
+  
+  emmeans_df_wind$Year <- as.numeric(as.character(emmeans_df_wind$Fact_year))
+  
+  # Addition of information on the significance (or lack thereof) of the trend
+  general_model_wind_Year <- 
+    glmmTMB(Wind_pollinated~Sc_year + Sc_lat_plot + Sc_long_plot 
+                                     + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_df_wind$Anova_p <- Anova(general_model_wind_Year)["Pr(>Chisq)"]["Sc_year",1]
+  emmeans_df_wind$Significance <- 
+    ifelse(emmeans_df_wind$Anova_p<0.05,"Significant", "Non-significant")
+  
+  emmeans_df_wind$Pollination <- "Wind-pollinated"
+  
+  # insect
+  general_model_insect <- 
+    glmmTMB(Insect_pollinated~Fact_year + Sc_lat_plot 
+                                  + Sc_long_plot + (1|S_name/P_name), habitat_h, family=poisson)
+  emmeans_result_insect <- emmeans(general_model_insect, ~ Fact_year)
+  emmeans_df_insect <- as.data.frame(emmeans_result_insect)
+  emmeans_df_insect$Year <- as.numeric(as.character(emmeans_df_insect$Fact_year))
+  
+  emmeans_df_insect$emmean_exp <- exp(emmeans_df_insect$emmean)
+
+  # Addition of information on the significance (or lack thereof) of the trend
+  general_model_insect_Year <- 
+    glmmTMB(Insect_pollinated~Sc_year + Sc_lat_plot + Sc_long_plot 
+                                       + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_df_insect$Anova_p <- Anova(general_model_insect_Year)["Pr(>Chisq)"]["Sc_year",1]
+  emmeans_df_insect$Significance <- 
+    ifelse(emmeans_df_insect$Anova_p<0.05,"Significant", "Non-significant")
+  
+  emmeans_df_insect$Pollination <- "Insect-pollinated"
+
+  # Assembly
+  emmeans_df <- rbind(emmeans_df_wind, emmeans_df_insect)
+  emmeans_df <- merge(emmeans_df, nb_plots, by.x="Fact_year" , by.y="Year", all.x=TRUE, all.y=FALSE)
+  emmeans_df$Year <- as.numeric(as.character(emmeans_df$Fact_year))
+  
+  # Plot
+  emmeans_df$Pollination <- as.factor(as.character(emmeans_df$Pollination))
+  
+  ggplot(emmeans_df, aes(x = Year, y = emmean_exp, color=Pollination, 
+                         linetype=Significance, size=(Freq*0.1))) +
+    geom_point() + 
+    scale_color_manual(values=c("Wind-pollinated"="#c3c86a",
+                                "Insect-pollinated"="#6a84c8")) + #c86a9f
+    scale_fill_manual(values=c("Wind-pollinated"="#c3c86a",
+                               "Insect-pollinated"="#6a84c8")) +
+    
+    geom_smooth(formula = y~ x, method=lm, data = emmeans_df,se=TRUE, fullrange=TRUE, 
+                aes(y = emmean_exp, x = Year, fill=Pollination), alpha = 0.3, size=1.5) +
+    scale_linetype_manual(values=c("Significant"="solid", "Non-significant"="dotted",
+                                   aesthetics = "black")) +
+    labs(x = "Year", y = "Mean species richness") +
+    ggtitle(title) +
+    scale_x_continuous(breaks = unique(emmeans_df$Year)) +
+    ylim(0,max(emmeans_df$emmean_exp)+1) +
+    theme_classic() +
+    theme(axis.text.x=element_text(size=10, angle = 45, vjust = 1, hjust = 1),
+          axis.text.y=element_text(size=10),
+          axis.title = element_text(size=14))
+}
+
+p_total <- Emmeans("total", "Total")
+
+```
+
+```{r Model and plot for each habitat, echo=TRUE}
+# Model and plot for each habitat
+Emmeans <- function(habitat, title){
+  
+  habitat_h<- surveys[surveys$corineType_engl==habitat,]
+  
+  habitat_h$Sc_long_plot <- scale(habitat_h$Long_plot)
+  habitat_h$Sc_lat_plot <- scale(habitat_h$Lat_plot)
+  habitat_h$Sc_year <- scale(habitat_h$Year)
+  
+  # Number of plots per year
+  nb_plots <- data.frame(table(habitat_h$Year))
+  names(nb_plots)[1] <- "Year"
+  habitat_h <- merge(habitat_h, nb_plots, by.x="Fact_year" ,by.y="Year", all.x=TRUE, all.y=FALSE)
+  
+  # wind
+  general_model_wind <- 
+    glmmTMB(Wind_pollinated~Fact_year + Sc_lat_plot + Sc_long_plot 
+                                + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_result_wind <- emmeans(general_model_wind, ~ Fact_year)
+  emmeans_df_wind <- as.data.frame(emmeans_result_wind)
+  
+  emmeans_df_wind$emmean_exp <- exp(emmeans_df_wind$emmean)
+  
+  emmeans_df_wind$Year <- as.numeric(as.character(emmeans_df_wind$Fact_year))
+  
+  # Addition of information on the significance (or lack thereof) of the trend
+  general_model_wind_Year <- 
+    glmmTMB(Wind_pollinated~Sc_year + Sc_lat_plot + Sc_long_plot 
+                                     + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_df_wind$Anova_p <- Anova(general_model_wind_Year)["Pr(>Chisq)"]["Sc_year",1]
+  emmeans_df_wind$Significance <- 
+    ifelse(emmeans_df_wind$Anova_p<0.05,"Significant", "Non-significant")
+  
+  emmeans_df_wind$Pollination <- "Wind-pollinated"
+  
+  # insect
+  general_model_insect <- 
+    glmmTMB(Insect_pollinated~Fact_year + Sc_lat_plot + Sc_long_plot 
+                                  + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_result_insect <- emmeans(general_model_insect, ~ Fact_year)
+  emmeans_df_insect <- as.data.frame(emmeans_result_insect)
+  emmeans_df_insect$Year <- as.numeric(as.character(emmeans_df_insect$Fact_year))
+  
+  emmeans_df_insect$emmean_exp <- exp(emmeans_df_insect$emmean)
+
+  # Addition of information on the significance (or lack thereof) of the trend
+  general_model_insect_Year <- 
+    glmmTMB(Insect_pollinated~Sc_year + Sc_lat_plot + Sc_long_plot 
+                                       + (1|S_name/P_name), habitat_h, family=poisson)
+  
+  emmeans_df_insect$Anova_p <- Anova(general_model_insect_Year)["Pr(>Chisq)"]["Sc_year",1]
+  emmeans_df_insect$Significance <- 
+    ifelse(emmeans_df_insect$Anova_p<0.05,"Significant", "Non-significant")
+  
+  emmeans_df_insect$Pollination <- "Insect-pollinated"
+
+  # Assembly
+  emmeans_df <- rbind(emmeans_df_wind, emmeans_df_insect)
+  emmeans_df <- merge(emmeans_df, nb_plots, by.x="Fact_year" , by.y="Year", all.x=TRUE, all.y=FALSE)
+  emmeans_df$Year <- as.numeric(as.character(emmeans_df$Fact_year))
+  
+  # Plot
+  emmeans_df$Pollination <- as.factor(as.character(emmeans_df$Pollination))
+  
+  ggplot(emmeans_df, aes(x = Year, y = emmean_exp, 
+                         color=Pollination, linetype=Significance, size=(Freq*0.1))) +
+    geom_point() + 
+    scale_color_manual(values=c("Wind-pollinated"="#c3c86a",
+                                "Insect-pollinated"="#6a84c8")) +
+    scale_fill_manual(values=c("Wind-pollinated"="#c3c86a",
+                               "Insect-pollinated"="#6a84c8")) +
+    
+    geom_smooth(formula = y~ x, method=lm, data = emmeans_df,se=TRUE, fullrange=TRUE, 
+                aes(y = emmean_exp, x = Year, fill=Pollination), alpha = 0.3, size=1.5) +
+    scale_linetype_manual(values=c("Significant"="solid", "Non-significant"="dotted",
+                                   aesthetics = "black")) +
+    labs(x = "Year", y = "Mean species richness") +
+    ggtitle(title) +
+    scale_x_continuous(breaks = unique(emmeans_df$Year)) +
+    ylim(0,max(emmeans_df$emmean_exp)+1) +
+    theme_classic() +
+    theme(axis.text.x=element_text(size=10, angle = 45, vjust = 1, hjust = 1),
+          axis.text.y=element_text(size=10),
+          axis.title = element_text(size=14))
+}
+
+p_crop <- Emmeans("Croplands", "Croplands")
+p_shrub <- Emmeans("Shrubs", "Shrubs")
+p_cities <- Emmeans("Cities", "Cities")
+p_grass <- Emmeans("Grasslands", "Grasslands")
+p_forest<- Emmeans("Forests", "Forests")
+p_wast <- Emmeans("Wastelands", "Wastelands")
+
+p_habitats <- ggarrange(p_total, p_crop, p_forest, p_wast, p_grass, p_cities, p_shrub, 
+                        NULL, nrow=4, ncol=2, common.legend = TRUE, legend="right")
+
+
+```
+
+```{r Plot community richness, results="markup", fig.width = 12, fig.height = 18}
+p_habitats
+```
+
+<p style="text-align:justify;">
+Mean species richness of predominantly insect-pollinated species (in blue) and predominantly wind-pollinated species (in green) per plot for each year between 2009 and 2022, for all habitats (Total), in croplands, in cities, in meadows, in forests and in wastelands. The circle diameter is proportional to the number of records. Solid lines indicate a significant temporal change, while dashed lines indicate a non-significant year effect. The blue and green ribbons represent the 95% confidence interval.
+</p>
+
+
+## Correlations between temporal trends in species abundance and traits related to pollination
+
+```{r species data importation, echo=FALSE, include=FALSE}
+# Species data importation
+sp_data <- data.table::fread("data/Appendix_10_Dataset_for_species_analysis.csv", sep=";")
+
+# we remove underrepresented flower shapes
+sp_data <- subset(sp_data, sp_data$Flower_shape != "f" & sp_data$Flower_shape != "t")
+
+sp_data$Flower_colour <- as.factor(as.character(sp_data$Flower_colour))
+```
+
+### Temporal trend distribution
+```{r Temporal trend distribution, echo=TRUE, include=TRUE, fig.width = 12, fig.height = 8}
+table(sp_data$Trend)
+
+    # to order species
+    sp_data <- sp_data[order(sp_data$EstimateLogit, decreasing = TRUE),]
+    sp_data$Species <- factor(sp_data$Species, levels = sp_data$Species)
+    
+    # to order the legend
+    sp_data$Trend <- factor(sp_data$Trend, levels = c("Increase", "Trendless", "Decline"))
+    
+    # plot
+     p <- ggplot(sp_data, aes(x=Species, y=EstimateLogit, col=Trend)) +
+      geom_point(data = sp_data, aes(x = Species, y = EstimateLogit),size=1) + 
+      geom_linerange(data = sp_data, aes(ymin = EstimateLogit-Std.errorLogit, 
+                                         ymax = EstimateLogit+Std.errorLogit), size=0.01) +
+      scale_color_manual(values=c("Decline"="#D81B60",
+                             "Trendless"="#8F6BCA",
+                             "Increase"="#93CA62"))  +
+      labs(title = paste("Temporal trends (France)"),
+           x="Species", y = "Estimated temporal trends")+ 
+      theme_classic() +
+      theme(axis.text.y = element_text(size=11),
+            axis.text.x = element_text(size=2,angle = 90, vjust = 0.5, hjust=1),
+            axis.title=element_text(size=13)) +
+      geom_hline(yintercept=0, col="grey",linetype="dashed")
+    p
+    
+```
+<p style="text-align:justify;">
+Temporal trends in abundance for the 561 species, colored according to its sign: green point for increasing temporal trends, purple for trendless and pink for declining ones. The bars correspond to the standard errors associated to each temporal trend assessment.
+</p>
+
+
+### Estimation of an animal pollination syndrome through a multiple correspondence analysis, and relationship with species temporal trends
+
+```{r MCA, echo=FALSE, include=FALSE}
+# We select traits for MCA
+select_df <- sp_data[,c("Species","Flower_colour","Flower_shape", "Nectar_qty",
+                        "EstimateLogit","Std.errorLogit", "Presence")]
+
+# We keep species for which the information is complete
+select_df <- select_df[complete.cases(select_df),]
+
+select_df$Flower_colour <- as.factor(as.character(select_df$Flower_colour))
+select_df$Flower_shape <- as.factor(as.character(select_df$Flower_shape))
+select_df$Nectar_qty <- as.factor(as.character(select_df$Nectar_qty))
+
+# We store the names of the species, their temporal trend and their standard error
+Species_NbTotal <- select_df[,c("Species","EstimateLogit","Std.errorLogit", "Presence")]
+
+# We delete variables that are not floral traits
+select_df$Species <- NULL
+select_df$Presence <- NULL
+select_df$EstimateLogit <- NULL
+select_df$Std.errorLogit <- NULL
+
+# Separation of quantitative and qualitative variables, according to the traits selected
+X.quanti <- splitmix(select_df)$X.quanti
+X.quali <- splitmix(select_df)$X.quali
+
+# PCAmix analysis
+pca<-PCAmix(X.quanti=X.quanti,X.quali=X.quali,
+             ndim=5,graph=FALSE)
+
+# Retrieve variable coordinates to plot variables and individuals
+# assembly of variable values in a single table
+cor_p <- data.frame(rbind(pca$quanti$coord ,pca$levels$coord))
+cor_p <- tibble::rownames_to_column(cor_p,"Variable")
+
+# table of coordinates of individuals, their temporal trend and their floral traits
+cor_ind <- data.frame(pca$ind$coord)
+cor_ind <- cbind(cor_ind,Species_NbTotal)
+cor_ind <- cbind(cor_ind, select_df) 
+
+# Function for displaying qualitative and quantitative variables on the same plot
+Corr_circle <- function(coord) {
+  ggplot(coord, aes(x=dim.1,y=dim.2, label=Variable)) +
+    geom_point() +
+    geom_circle(aes(x0=0,y0=0,r=1)) + 
+    geom_segment(
+      x = 0, y = 0,
+      xend = coord$dim.1, yend = coord$dim.2,
+      lineend = "round", 
+      linejoin = "round",
+      size = 0.5, 
+      arrow = arrow(length = unit(0.1, "inches")),
+      colour = "black"
+    ) +
+    geom_text(hjust=1, vjust=-1, size=3) +
+    geom_hline(yintercept = 0, linetype="dotted") +
+    geom_vline(xintercept=0, linetype="dotted") +
+    labs(x=paste0("Dim 1 (",round(pca$eig["dim 1","Proportion"],2),"%)"),
+         y=paste0("Dim 2 (",round(pca$eig["dim 2","Proportion"],2),"%)"),
+         title="Correlation circle")
+}
+
+# Plot of variables
+Corr_circle(cor_p)
+
+# Plot of variables and individuals
+coord <- cor_p
+cor_ind$Trend <- ifelse(cor_ind$EstimateLogit+cor_ind$Std.errorLogit<0,"Decline",
+                        ifelse(cor_ind$EstimateLogit-cor_ind$Std.errorLogit>0 ,"Increase","Trendless"))
+
+Plot_MCA <- ggplot(coord, aes(x=dim.1,y=dim.2)) +
+  geom_point(data = cor_ind, 
+             aes(x = dim.1, y = dim.2, size=1/(Std.errorLogit),  fill = Trend), shape = 21, stroke = 0) + 
+
+  scale_fill_manual(values=c("Decline"="#D81B60",
+                             "Trendless"="#8F6BCA",
+                             "Increase"="#93CA62")) +
+  geom_segment(
+    x = 0, y = 0,
+    xend = coord$dim.1, yend = coord$dim.2,
+    
+    lineend = "round",
+    linejoin = "round",
+    size = 0.5, 
+    arrow = arrow(length = unit(0.1, "inches")),
+    colour = "black" 
+  ) +
+  geom_text(aes(label=Variable),hjust=1, vjust=-1, size=4) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  geom_vline(xintercept=0, linetype="dotted") +
+  labs(x=paste0("Dim 1 (",round(pca$eig["dim 1","Proportion"],2),"%)"),
+       y=paste0("Dim 2 (",round(pca$eig["dim 2","Proportion"],2),"%)"),
+       title="",
+       color=" Temporal trend",
+       size="1/Standard error") + # too big if we square the standard error
+  theme(panel.background=element_rect(fill="white"))
+
+#cvdPlot(p) # check that the colours are suitable for people with dalstonia
+
+# To save the plot
+# svg("results/MCA.svg", width = 8, height = 6) # save the plot
+# p
+# dev.off() 
+
+```
+
+```{r Plot MCA, results="markup", fig.width = 12, fig.height = 8}
+Plot_MCA
+```
+<p style="text-align:justify;">
+Multiple correspondence analysis performed with the three floral traits: flower colour, flower shape and nectar quantity. Each circle represents one species, with colours indicating the estimated temporal trend in abundance (see below) and sizes indicating the precision of the estimate.
+</p>
+
+```{r Traits and trends relationships, echo=FALSE, include=FALSE}
+# Addition of information on pollinator dependency
+axes <- data.frame( pca[["ind"]][["coord"]])
+select_df$Syndrome <-axes$dim.1
+select_df$Species <- Species_NbTotal$Species
+select_df <- merge(select_df, sp_data[,c("Species","EstimateLogit", "Presence", "Std.errorLogit",  
+                                         "Pct_insect_dep", "Pct_wind_dep", "Pollination")], by="Species")
+
+select_df$`1/Standard error²` <- 1/(select_df$Std.errorLogit^2)
+
+# Plot of the relationship between the value of the pollination syndrome and the temporal trend of species
+Plot_syndr <- ggplot(select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                                       "Persicaria hydropiper"),], 
+                     aes(x=Syndrome, y=EstimateLogit)) +
+  geom_point(aes(color=Pollination, size=`1/Standard error²`)) + #  size=1/Std.errorScaled.1
+  geom_smooth(formula = y~ x, method=lm, 
+              data = select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                                       "Persicaria hydropiper"),], 
+              se=TRUE, fullrange=TRUE, aes(y = EstimateLogit, x = Syndrome), alpha = 0.3, color="#f75f75", fill="#f75f75") +
+  labs(x="Pollination syndrome", y="Temporal trend", color="Entomophily") +
+  scale_color_manual(values=c("#6a84c8", "#c4cbcb", "#c3c86a"),
+                        labels=c("Insect-pollinated", "Other", "Wind-pollinated")) +
+  labs(x="Animal pollination syndrome", y="Temporal trend", color="Main pollination vector") +
+  theme_minimal()
+  
+
+# Checking the relationship between estimated pollination syndrome and % of dependence on insect pollinators
+cor.test(select_df$Pct_insect_dep, select_df$Syndrome)
+cor.test( select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                            "Persicaria hydropiper"),]$Pct_insect_dep,  
+          select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                            "Persicaria hydropiper"),]$Syndrome)
+
+#ggsave(file="F:/Thèse/Rédaction_Article/Article 1/Figures/Fig3_Relation_TT_Syndrome.png", width = 210, height = 145, units = "mm")
+
+```
+
+```{r Plot Syndrome Trend relationship, results="markup", fig.width = 12, fig.height = 8}
+Plot_syndr
+```
+<p style="text-align:justify;">
+Relationship between the temporal trend in abundance and the animal pollination syndrome of 459 common flower plant species.
+</p>
+
+
+```{r Model Syndrome Trend relationship}
+
+# Function to estimate R2
+r_sq <- function(model){
+  # print(paste("R²",round(summary(model)[["r.squared"]],3)))
+  # print(paste("Adjusted R²:",round(summary(model)[["adj.r.squared"]],3)))
+  R2 <- round(summary(model)[["r.squared"]],3)
+  Adjusted_R2 <- round(summary(model)[["adj.r.squared"]],3)
+  
+  list(R2,Adjusted_R2)
+}
+
+# Model
+model_syndr_with_weight <- lm(EstimateLogit~scale(Syndrome), 
+                              data=select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                                                     "Persicaria hydropiper"),], 
+                              weights = 1/(Std.errorLogit^2))
+summary(model_syndr_with_weight)
+anova(model_syndr_with_weight)
+qqPlot(residuals(model_syndr_with_weight)) 
+r_sq(model_syndr_with_weight)
+
+model_syndr_without_weight <- lm(EstimateLogit~scale(Syndrome), 
+                                 data=select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                                                        "Persicaria hydropiper"),])
+summary(model_syndr_without_weight)
+anova(model_syndr_without_weight)
+qqPlot(residuals(model_syndr_without_weight)) 
+
+```
+
+```{r Model }
+
+select_df$Pct_insect_dep_sc <- scale(select_df$Pct_insect_dep)
+select_df$Pct_wind_dep_sc <- scale(select_df$Pct_wind_dep)
+
+select_df$Pollination <- as.factor(as.character(select_df$Pollination))
+
+sp_data$Pct_insect_dep_sc <- scale(sp_data$Pct_insect_dep)
+sp_data$Pct_wind_dep_sc <- scale(sp_data$Pct_wind_dep)
+
+# Function to obtain ANOVA table with weighting
+
+model_function <- function(trait, dataset, dataset_name, trait_name, add_weight, check_homo){
+  back <- dataset
+  
+  if (add_weight==TRUE){
+ 
+    # Model
+    model=lm(as.formula(paste("EstimateLogit~", trait)), data=dataset, weights = 1/(Std.errorLogit^2))
+    
+    # Check for normality
+    # png(filename = here("figures","model_checking", paste0("Diagnostic plots for residuals - ", trait_name, "-", dataset_name, ".png")), width = 800, height = 500)      
+    # par(mfrow = c(1, 2), oma = c(0, 0, 3, 0))
+    # hist(residuals(model), freq = TRUE, col = "#dca2e8", main = "Histogram of Residuals", xlab = "Residuals")
+    # qqPlot(residuals(model), main = "QQ Plot of Residuals", col.lines = "#dca2e8")
+    # mtext(paste0("Diagnostic plots for residuals - ", trait_name, " (", dataset_name, ")"), outer = TRUE, line = 1, cex = 1.5, font = 2)
+    # dev.off()
+    
+    if (is.numeric(dataset[[trait]])==FALSE) { # for categorical traits, we add the checking for homogeneity
+      
+      if (check_homo==TRUE) { # if we want to ensure the assumption of homogeneity
+        
+        # Check for homoscedasticity
+        count_iter <- 0 # to count the number of iterations required (and therefore the number of outliers to remove in order to meet the condition)
+        message <- capture.output(check_homogeneity(model)) # to store the message returned by the function check_homogeneity()
+        
+        print(count_iter) # to check the first iteration number
+        print(message) # to display the first message
+        
+        while (any(grepl("Warning", message))==TRUE & count_iter<5){ # as long as there's a warning message
+          count_iter <- count_iter +1 # we start a new iteration
+          #outlier_index <- qqPlot(model)[1] # we identify the most extreme outlier
+          
+          outlier_index <- tryCatch({
+            as.numeric(qqPlot(model, labels = FALSE, id.n = 1)[1])
+          }, error = function(e) NA)
+          
+          print(dataset[outlier_index, "Species"])
+          
+          dataset <- dataset[-outlier_index, ]
+          
+          model=lm(as.formula(paste("EstimateLogit~", trait)), data=dataset, 
+                   weights = 1/(Std.errorLogit^2)) # we relaunch the model whithout the outlier
+          message <- capture.output(check_homogeneity(model)) # we store the new message
+          
+          print(count_iter) # we display the new total of iterations
+          print(message) # we display the new message
+          
+        }
+        
+        print(count_iter) # we display the final number of iterations required to ensure homogeneity 
+        
+        message <- capture.output(check_homogeneity(model)) # we store the final message
+        print(message) # and display it
+      }
+      
+      # ANOVA
+      anova_table <- broom::tidy(anova(model))
+      anova_table <- anova_table %>%
+        rename(
+          Term = term,
+          Df = df,
+          `Sum Sq` = sumsq,
+          `Mean Sq` = meansq,
+          `F value` = statistic,
+          `P value` = p.value
+        )
+      
+      anova_table$Dataset <- NA
+      anova_table$Dataset <- dataset_name
+      anova_table <- anova_table %>% relocate(Dataset, .before = 2)
+      
+      # R2
+      anova_table$R2 <- r_sq(model)[[1]]
+      anova_table$Adjusted_R2 <- r_sq(model)[[2]]
+      
+      anova_table$Outlier <- NA
+      if(check_homo==TRUE) {anova_table$Outlier <- "Without" } else {anova_table$Outlier <- "With"}
+      
+      #anova_table$Count_outlier <- count_iter
+      
+      anova_table
+      
+      # Emmeans
+      result <- emmeans(model, specs = as.formula(paste0("pairwise ~ ", trait)), adjust = "holm")
+      contrast_df <- tidy(result$contrasts)
+      
+      contrast_df$Dataset <- dataset_name
+      contrast_df <- contrast_df %>% relocate(Dataset, .before = 2)
+      
+      contrast_df$Outlier <- NA
+      if(check_homo==TRUE) {contrast_df$Outlier <- "Without" } else {contrast_df$Outlier <- "With"}
+      
+      # Output
+      output <- list(anova=anova_table, contrasts=contrast_df)
+      return(output)
+      
+      }
+    
+    else {
+      
+      # ANOVA
+      anova_table <- broom::tidy(anova(model))
+      anova_table <- anova_table %>%
+        rename(
+          Term = term,
+          Df = df,
+          `Sum Sq` = sumsq,
+          `Mean Sq` = meansq,
+          `F value` = statistic,
+          `P value` = p.value
+        )
+      
+      anova_table$Dataset <- dataset_name
+      anova_table <- anova_table %>% relocate(Dataset, .before = 2)
+      anova_table
+      
+      # Add estimate and SE
+      sum_model <- summary(model)
+      estimate <- sum_model[["coefficients"]][, "Estimate"][2]
+      std_error <- sum_model[["coefficients"]][, "Std. Error"][2]
+      
+      anova_table$Estimate <- NA
+      anova_table$Estimate[anova_table$Term==trait] <- estimate
+      
+      anova_table$SE <- NA
+      anova_table$SE[anova_table$Term==trait] <- std_error
+      
+      # R2
+      anova_table$R2 <- r_sq(model)[[1]]
+      anova_table$Adjusted_R2 <- r_sq(model)[[2]]
+      
+      anova_table$Outlier <- NA
+      if(check_homo==TRUE) {anova_table$Outlier <- "Without" } else {anova_table$Outlier <- "With"}
+      
+      anova_table
+      
+      
+      # Output
+      output <- list(anova=anova_table)
+      return(output)
+    }
+    
+  }
+    
+  else { 
+    
+  # Model
+  model=lm(as.formula(paste("EstimateLogit~", trait)), data=dataset)
+  
+  # Check for normality
+  # png(filename = here("figures","model_checking", paste0("Diagnostic plots for residuals - ", trait_name, "-", dataset_name, ".png")), width = 800, height = 500)      
+  # par(mfrow = c(1, 2), oma = c(0, 0, 3, 0))
+  # hist(residuals(model), freq = TRUE, col = "#dca2e8", main = "Histogram of Residuals", xlab = "Residuals")
+  # qqPlot(residuals(model), main = "QQ Plot of Residuals", col.lines = "#dca2e8")
+  # mtext(paste0("Diagnostic plots for residuals - ", trait_name, " (", dataset_name, ")"), outer = TRUE, line = 1, cex = 1.5, font = 2)
+  # dev.off()
+  
+  if (is.numeric(dataset[[trait]])==FALSE) { # for categorical traits, we add the checking for homogeneity
+    
+    if (check_homo==TRUE) { # if we want to ensure the assumption of homogeneity
+      
+    # Check for homoscedasticity
+    count_iter <- 0 # to count the number of iterations required (and therefore the number of outliers to remove in order to meet the condition)
+    message <- capture.output(check_homogeneity(model)) # to store the message returned by the function check_homogeneity()
+    
+    print(count_iter) # to check the first iteration number
+    print(message) # to display the first message
+    
+    while (any(grepl("Warning", message))==TRUE & count_iter<5){ # as long as there's a warning message
+      count_iter <- count_iter +1 # we start a new iteration
+      #outlier_index <- qqPlot(model)[1] # we identify the most extreme outlier
+      
+      outlier_index <- tryCatch({
+        as.numeric(qqPlot(model, labels = FALSE, id.n = 1)[1])
+      }, error = function(e) NA)
+      
+      print(dataset[outlier_index, "Species"])
+      
+      dataset <- dataset[-outlier_index, ]
+      
+      model=lm(as.formula(paste("EstimateLogit~", trait)), data=dataset) # we relaunch the model whithout the outlier
+      message <- capture.output(check_homogeneity(model)) # we store the new message
+      
+      print(count_iter) # we display the new total of iterations
+      print(message) # we display the new message
+    }
+    
+    print(count_iter) # we display the final number of iterations required to ensure homogeneity 
+    
+    message <- capture.output(check_homogeneity(model)) # we store the final message
+    print(message) # and display it
+    
+    }
+    
+    # ANOVA
+    anova_table <- broom::tidy(anova(model))
+    anova_table <- anova_table %>%
+      rename(
+        Term = term,
+        Df = df,
+        `Sum Sq` = sumsq,
+        `Mean Sq` = meansq,
+        `F value` = statistic,
+        `P value` = p.value
+      )
+    
+    anova_table$Dataset <- dataset_name
+    anova_table <- anova_table %>% relocate(Dataset, .before = 2)
+    
+    # R2
+    anova_table$R2 <- r_sq(model)[[1]]
+    anova_table$Adjusted_R2 <- r_sq(model)[[2]]
+    
+    anova_table$Outlier <- NA
+    if(check_homo==TRUE) {anova_table$Outlier <- "Without" } else {anova_table$Outlier <- "With"}
+    
+    #anova_table$Count_outlier <- count_iter
+    
+    anova_table
+    
+    # Emmeans
+    result <- emmeans(model, specs = as.formula(paste0("pairwise ~ ", trait)), adjust = "holm")
+    contrast_df <- tidy(result$contrasts)
+    
+    contrast_df$Dataset <- dataset_name
+    contrast_df <- contrast_df %>% relocate(Dataset, .before = 2)
+    
+    contrast_df$Outlier <- NA
+    if(check_homo==TRUE) {contrast_df$Outlier <- "Without" } else {contrast_df$Outlier <- "With"}
+    
+    # Output
+    output <- list(anova=anova_table, contrasts=contrast_df)
+    return(output)
+  }
+  
+  else {
+    
+    # ANOVA
+    anova_table <- broom::tidy(anova(model))
+    anova_table <- anova_table %>%
+      rename(
+        Term = term,
+        Df = df,
+        `Sum Sq` = sumsq,
+        `Mean Sq` = meansq,
+        `F value` = statistic,
+        `P value` = p.value
+      )
+    
+    anova_table$Dataset <- dataset_name
+    anova_table <- anova_table %>% relocate(Dataset, .before = 2)
+    anova_table
+    
+    # Add estimate and SE
+    sum_model <- summary(model)
+    
+    estimate <- sum_model[["coefficients"]][, "Estimate"][2]
+    std_error <- sum_model[["coefficients"]][, "Std. Error"][2]
+    
+    anova_table$Estimate <- NA
+    anova_table$Estimate[anova_table$Term==trait] <- estimate
+    
+    anova_table$SE <- NA
+    anova_table$SE[anova_table$Term==trait] <- std_error
+    
+    # R2
+    anova_table$R2 <- r_sq(model)[[1]]
+    anova_table$Adjusted_R2 <- r_sq(model)[[2]]
+    
+    anova_table$Outlier <- NA
+    if(check_homo==TRUE) {anova_table$Outlier <- "Without" } else {anova_table$Outlier <- "With"}
+    
+    anova_table
+    
+    # Output
+    output <- list(anova=anova_table)
+    return(output)
+    
+  }
+  
+  }
+  
+}
+
+# To construct table with gt package
+gt_table <- function(all_anova, add_weight){
+  subtitle_value <- ifelse(add_weight==TRUE, "With weighting", "Without weighting")
+  gt_anova <- all_anova %>%
+    gt() %>%
+    fmt_number(
+      columns = c(`Sum Sq`, `Mean Sq`, `F value`, `P value`, Estimate, SE),
+      decimals = 3
+    ) %>%
+    tab_header(
+      title = md("**Analysis of variance (ANOVA) table comparing the temporal trends in species abundance across traits**"),
+      subtitle = subtitle_value
+    ) %>%
+    cols_label(
+      `Sum Sq` = "Sum Square",
+      `Mean Sq` = "Mean Square",
+      `F value` = "F",
+      `P value` = "P",
+      Term = "Traits",
+      R2 = "R²",
+      Adjusted_R2 = "R² adjusted"
+    ) %>%
+    tab_options(
+      table.font.size = "small"
+    )
+}
+
+gt_table_emmeans <- function(all_contrasts, add_weight){
+  subtitle_value <- ifelse(add_weight==TRUE, "With weighting", "Without weighting")
+  gt_contrasts <- all_contrasts %>%
+    gt() %>%
+    fmt_number(
+      columns = c(estimate, std.error, df, statistic, adj.p.value),
+      decimals = 3
+    ) %>%
+    tab_header(
+      title = md("**Estimated marginal means**"),
+      subtitle = subtitle_value
+    ) %>%
+    cols_label(
+      `estimate` = "Estimate",
+      `std.error` = "SE",
+      `df` = "Df",
+      `statistic` = "Statistic",
+      term = "Traits",
+      contrast = "Contrast",
+      adj.p.value = "adjusted P"
+    ) %>%
+    tab_options(
+      table.font.size = "small"
+    )
+}
+
+```
+
+### Trait-by-trait analyse (figures)
+
+```{r function for plots, echo=FALSE, include=FALSE}
+
+plot_trait <- function(trait, data, trait_name) { # model, 
+  
+  # we define colors and labels according to the trait
+ list_values <- switch(trait,
+    "Flower_colour" = c("#1373ab", "#55ab13", "violet", "grey", "#f5f209"),
+    "Flower_shape" = rep("#f75f75", 7),
+    "Pollination"   = c("#c3c86a", "#c4cbcb", "#6a84c8"),
+    "Nectar_qty" = rep("#f75f75", 4),
+    NULL
+  )
+  
+  list_labels <- switch(trait,
+    "Flower_colour" = c("Blue", "Green", "Violet, pink, red", "White", "Yellow"),
+    "Flower_shape"  = c("b", "br", "d", "dt", "fl", "h", "l"),
+    "Pollination"   = c("Wind-pollinated", "Other", "Insect-pollinated"),
+    "Nectar_qty" = c("absence", "little", "abundant", "very abundant"),
+    NULL
+  )
+  
+  # we define the order
+  list_order <-  switch(trait,
+    "Flower_colour" = c("B", "Gr", "VPR", "W", "Ye"),
+    "Flower_shape"  = c("b", "br", "d", "dt", "fl", "h", "l"),
+    "Pollination"   = c("Wind-pollinated", "Other", "Insect-pollinated"),
+    "Nectar_qty" = c("absence", "little", "abundant", "very abundant"),
+    NULL
+  )
+  
+  data[[trait]] <- factor(data[[trait]], levels = list_order)
+  
+  # we indicate the model to launch
+  model=lm(as.formula(paste("EstimateLogit~", trait)), data=data, weights = 1/(Std.errorLogit^2))
+
+  # we estimate marginal means
+  trait_formula <- as.formula(paste("pairwise ~", trait))
+ 
+  LetterResults <- 
+    emmeans(model, specs = trait_formula, adjust = "holm") %>%
+    multcomp::cld(Letters = letters)
+  
+  # plot
+  ggbetweenstats(
+    data = data,
+    x = !!sym(trait),
+    y = EstimateLogit,
+    p.adjust.method = "holm",
+    xlab = trait_name,
+    ylab = "Temporal trend",
+    centrality.plotting = TRUE,
+    centrality.type = "parameteric",
+    centrality.point.args = list(size = 4, color = "#C30F0F"),
+    # centrality.label.args = list(label = NULL),
+    centrality.label.args = list(size = 0, nudge_x = 0, segment.linetype = 0,
+                                 min.segment.length = 0, alpha=0),
+    point.args = list(position = ggplot2::position_jitterdodge(dodge.width = 0.6),  size = 4, stroke = 0, na.rm = TRUE),
+    bf.message = FALSE,
+    results.subtitle = FALSE,
+    ggsignif.args = list(),
+    title = NULL,
+    subtitle = NULL,
+    digits=2
+    
+    ) +
+    
+    geom_text(data=LetterResults, aes(label=.group, y=0.50), size=4) +
+    theme_minimal()+
+    
+    theme(axis.title = element_text(size=14),
+              axis.title.x=element_text(size=12, face="plain"),
+              axis.title.y=element_text(size=12, face="plain"),
+          axis.text.x=element_text(size=10),
+          axis.text.y=element_text(size=10),
+          text = element_text(family = "sans")) +
+    
+        scale_color_manual(values=list_values,
+                        labels=list_labels) +
+   
+    labs(x=trait_name, y="Temporal trend") 
+
+}
+
+
+# for the 560 species dataset:
+Plot_Colour_560 <- plot_trait(trait = "Flower_colour", 
+                              data = sp_data[!sp_data$Species%in%c("Ceratochloa cathartica","Galium album"),], 
+                              trait_name = "Flower colour")
+
+Plot_Shape_560 <- plot_trait(trait = "Flower_shape", 
+                             data = sp_data[!sp_data$Species%in%c("Ceratochloa cathartica","Galium album"),], 
+                             trait_name = "Flower shape")
+
+Plot_Pollination_560 <- plot_trait(trait = "Pollination", 
+                                   data = sp_data[!sp_data$Species%in%c("Ceratochloa cathartica","Galium album"),], 
+                                   trait_name = "Main pollination vector")
+
+# for the 459 species dataset:
+Plot_Colour_459 <- plot_trait(trait = "Flower_colour", 
+                              data = select_df[!select_df$Species%in%c("Ceratochloa cathartica","Persicaria hydropiper"),], 
+                              trait_name = "Flower colour")
+
+Plot_Shape_459 <- plot_trait(trait = "Flower_shape", 
+                             data = select_df[!select_df$Species%in%c("Ceratochloa cathartica","Persicaria hydropiper"),], 
+                             trait_name = "Flower shape")
+
+Plot_Pollination_459 <- plot_trait(trait = "Pollination", 
+                                   data = select_df[!select_df$Species%in%c("Ceratochloa cathartica","Persicaria hydropiper"),], 
+                                   trait_name = "Main pollination vector")
+
+Plot_Nectar_459 <- plot_trait(trait = "Nectar_qty", 
+                              data = select_df[!select_df$Species%in%c("Ceratochloa cathartica","Persicaria hydropiper"),], 
+                              trait_name = "Nectar quantity")
+
+```
+
+<p style="text-align:justify;">
+Comparisons of species temporal trends according to four traits: main pollination vector, flower color, flower shape and nectar quantity. The results for the dataset including all 560 species are on the left, and those including 459 species are on the right (except for the quantity of nectar, which only concerns the latter). 
+Violin plots illustrate the full distribution of temporal trends within each group. Boxplots indicate the median (central line), the mean (red dot), interquartile range (box), and whiskers extending to 1.5 times the IQR. Each species is represented by a point. Letters above the boxes indicate results from Holm-adjusted post-hoc comparisons; groups sharing the same letter do not differ significantly (P>0.05).
+
+Note: chunks for the plots to be run separately on R (problem at knit time).
+</p>
+
+<!-- * Main pollination vector -->
+
+<!-- ```{r Main pollination vector, echo=TRUE, include=TRUE, fig.width = 12, fig.height = 8} -->
+<!-- ggarrange(Plot_Pollination_560, Plot_Pollination_459, nrow=1, ncol=2, common.legend = TRUE) -->
+<!-- ``` -->
+
+<!-- * Flower colour -->
+
+<!-- ```{r Flower colour, echo=TRUE, include=TRUE, fig.width = 12, fig.height = 8} -->
+<!-- ggarrange(Plot_Colour_560, Plot_Colour_459, nrow=1, ncol=2, common.legend = TRUE) -->
+<!-- ``` -->
+
+
+<!-- * Flower shape -->
+
+<!-- ```{r Flower shape, echo=TRUE, include=TRUE, fig.width = 14, fig.height = 8} -->
+<!-- ggarrange(Plot_Shape_560, Plot_Shape_459, nrow=1, ncol=2, common.legend = TRUE) -->
+<!-- ``` -->
+
+<!-- * Nectar quantity -->
+
+<!-- ```{r Nectar quantity, echo=TRUE, include=TRUE, fig.width = 12, fig.height = 8} -->
+<!-- Plot_Nectar_459 -->
+<!-- ``` -->
+
+
+<!-- ```{r Figure 4, echo=TRUE, include=TRUE, fig.width = 12, fig.height = 8} -->
+<!-- figure_4 <- ggarrange(Plot_syndr,Plot_Colour_560, Plot_Shape_560, Plot_Nectar_459, nrow=2, ncol=2, common.legend = FALSE) -->
+<!-- figure_4 -->
+<!-- ``` -->
+
+### Trait-by-trait analyse (table)
+
+#### With weighting and without outliers
+
+```{r with weigth and without outliers, echo=TRUE, include=TRUE, results = 'hide'}
+# We create a data.frame with the list of traits, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty") 
+trait_names <- c("Dependence on insect pollinators (%)", "Dependence on wind (%)", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+nom_traits <- data.frame(traits,trait_names)
+
+# For the "461 species dataset":
+# We indicate the list of trait to test, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+# We test the effect of each trait:
+total_output_list_461 <- pmap(
+  list(trait = traits, trait_name = trait_names), # we indicate the name of traits to test and their "cleaned" name
+  ~ model_function( # we apply the function to each trait
+    trait = ..1,
+    dataset = select_df[!select_df$Species%in%c("Ceratochloa cathartica","Persicaria hydropiper"),], # dataset without outliers
+    dataset_name = "461 species", # specify the name of the dataset you are working on
+    trait_name = ..2,
+    add_weight = TRUE, # TRUE if we want to take weight into account in the model
+    check_homo = TRUE # TRUE if we want to check for homogeneity
+  )
+)
+
+all_anova_461_C1 <- map_dfr(total_output_list_461, "anova")
+all_anova_461_C1 <- all_anova_461_C1[all_anova_461_C1$Term!="Residuals",]
+
+all_contrasts_461_C1 <- map_dfr(total_output_list_461, "contrasts")
+all_contrasts_461_C1$Signif <- ifelse(all_contrasts_461_C1$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_461_C1 <- all_contrasts_461_C1 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_461_C1 <- merge(all_contrasts_461_C1, nom_traits, by.x="term", by.y="traits", 
+                              all.x=TRUE, all.y=FALSE)
+all_contrasts_461_C1 <- all_contrasts_461_C1 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_461_C1$term <- all_contrasts_461_C1$trait_names
+all_contrasts_461_C1$trait_names <- NULL
+
+
+# Total dataset
+
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+
+total_output_list_total <- pmap(
+  list(trait = traits, trait_name = trait_names),
+  ~ model_function(
+    trait = ..1,
+    dataset = sp_data[!sp_data$Species%in%c("Ceratochloa cathartica",
+                                            "Galium album"),], # without outliers
+    dataset_name = "562 species",
+    trait_name = ..2,
+    add_weight = TRUE, # with weight
+    check_homo = TRUE
+  )
+)
+
+all_anova_total_C1 <- map_dfr(total_output_list_total, "anova")
+all_anova_total_C1<- all_anova_total_C1[all_anova_total_C1$Term!="Residuals",]
+
+all_contrasts_total_C1 <- map_dfr(total_output_list_total, "contrasts")
+all_contrasts_total_C1$Signif <- ifelse(all_contrasts_total_C1$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_total_C1 <- all_contrasts_total_C1 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_total_C1 <- merge(all_contrasts_total_C1, nom_traits, by.x="term", 
+                                by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_total_C1 <- all_contrasts_total_C1 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_total_C1$term <- all_contrasts_total_C1$trait_names
+all_contrasts_total_C1$trait_names <- NULL
+
+# Big table
+rm(big_table_C1)
+
+big_table_C1 <- rbind(all_anova_total_C1, all_anova_461_C1)
+big_table_C1 <- merge(big_table_C1, nom_traits, by.x="Term", by.y="traits", all.x=TRUE, all.y=FALSE)
+
+big_table_C1 <- big_table_C1 %>% # to order the rows
+  mutate(
+    Term = factor(Term, levels = c("Pct_insect_dep_sc", "Pct_wind_dep_sc", 
+                                   "Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+    Dataset = factor(Dataset, levels = c("562 species", "461 species"))
+    ) %>%
+  arrange(Term, Dataset)
+
+big_table_C1$Term <- big_table_C1$trait_names
+big_table_C1$trait_names <- NULL
+
+big_table_C1 <- subset(big_table_C1, !(big_table_C1$Term=="Nectar quantity" 
+                                       & big_table_C1$Dataset=="Total"))
+
+big_table_C1 <- big_table_C1 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+```
+```{r Results with weigth and without outliers, echo=TRUE, include=TRUE}
+# To display tables : 
+# Anova table
+knitr::kable(big_table_C1, "latex", 
+             caption = "Analysis of variance (ANOVA) table comparing the temporal trends in species abundance across traits, for the dataset of plant species with floral traits information (562 species) and for the subset of plant species with a pollination syndrome (461 species)", booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+# Emmeans tables
+knitr::kable(all_contrasts_461_C1, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 461 species dataset", 
+             booktabs = T) %>%
+   kable_styling(latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+knitr::kable(all_contrasts_total_C1, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 562 species dataset", 
+             booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+```
+
+#### Appendix - Case 2: with weighting and with outliers
+
+```{r with weigth and with outliers, echo=FALSE, include=FALSE}
+# We create a data.frame with the the list of traits, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty") 
+trait_names <- c("Dependence on insect pollinators (%)", "Dependence on wind (%)", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+nom_traits <- data.frame(traits,trait_names)
+
+# For the "461 species dataset":
+# We indicate the list of trait to test, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+# We test the effect of each trait:
+total_output_list_461 <- pmap(
+  list(trait = traits, trait_name = trait_names), # we indicate the name of traits to test and their "cleaned" name
+  ~ model_function( # we apply the function to each trait
+    trait = ..1,
+    dataset = select_df, # dataset with outliers
+    dataset_name = "461 species", # specify the name of the dataset you are working on
+    trait_name = ..2,
+    add_weight = TRUE, # TRUE if we want to take weight into account in the model
+    check_homo = FALSE # TRUE if we want to check for homogeneity
+  )
+)
+
+all_anova_461_C2 <- map_dfr(total_output_list_461, "anova")
+all_anova_461_C2 <- all_anova_461_C2[all_anova_461_C2$Term!="Residuals",]
+
+all_contrasts_461_C2 <- map_dfr(total_output_list_461, "contrasts")
+all_contrasts_461_C2$Signif <- ifelse(all_contrasts_461_C2$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_461_C2 <- all_contrasts_461_C2 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_461_C2 <- merge(all_contrasts_461_C2, nom_traits, by.x="term", 
+                              by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_461_C2 <- all_contrasts_461_C2 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_461_C2$term <- all_contrasts_461_C2$trait_names
+all_contrasts_461_C2$trait_names <- NULL
+
+
+# Total dataset
+
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+
+total_output_list_total <- pmap(
+  list(trait = traits, trait_name = trait_names),
+  ~ model_function(
+    trait = ..1,
+    dataset = sp_data,
+    dataset_name = "562 species",
+    trait_name = ..2,
+    add_weight = TRUE,
+    check_homo = FALSE
+  )
+)
+
+all_anova_total_C2 <- map_dfr(total_output_list_total, "anova")
+all_anova_total_C2<- all_anova_total_C2[all_anova_total_C2$Term!="Residuals",]
+
+all_contrasts_total_C2 <- map_dfr(total_output_list_total, "contrasts")
+all_contrasts_total_C2$Signif <- ifelse(all_contrasts_total_C2$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_total_C2 <- all_contrasts_total_C2 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_total_C2 <- merge(all_contrasts_total_C2, nom_traits, by.x="term", 
+                                by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_total_C2 <- all_contrasts_total_C2 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_total_C2$term <- all_contrasts_total_C2$trait_names
+all_contrasts_total_C2$trait_names <- NULL
+
+# Big table
+rm(big_table_C2)
+
+big_table_C2 <- rbind(all_anova_total_C2, all_anova_461_C2)
+big_table_C2 <- merge(big_table_C2, nom_traits, by.x="Term", by.y="traits", all.x=TRUE, all.y=FALSE)
+
+big_table_C2 <- big_table_C2 %>%
+  mutate(
+    Term = factor(Term, levels = c("Pct_insect_dep_sc", "Pct_wind_dep_sc", 
+                                   "Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+    Dataset = factor(Dataset, levels = c("562 species", "461 species"))
+    ) %>%
+  arrange(Term, Dataset)
+
+big_table_C2$Term <- big_table_C2$trait_names
+big_table_C2$trait_names <- NULL
+
+big_table_C2 <- subset(big_table_C2, !(big_table_C2$Term=="Nectar quantity" 
+                                       & big_table_C2$Dataset=="Total"))
+
+big_table_C2 <- big_table_C2 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+```
+
+```{r Results with weigth and with outliers, echo=FALSE, include=TRUE}
+# To display tables : 
+# Anova table
+knitr::kable(big_table_C2, "latex", 
+             caption = "Analysis of variance (ANOVA) table comparing the temporal trends in species abundance across traits, for the dataset of plant species with floral traits information (562 species) and for the subset of plant species with a pollination syndrome (461 species)", booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+# Emmeans tables
+knitr::kable(all_contrasts_461_C2, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 461 species dataset", 
+             booktabs = T) %>%
+   kable_styling(latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+knitr::kable(all_contrasts_total_C2, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 562 species dataset", 
+             booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+```
+
+#### Appendix - Case 3: without weighting and without outliers
+
+```{r without weigth and without outliers, echo=FALSE, include=FALSE}
+# We create a data.frame with the the list of traits, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty") 
+trait_names <- c("Dependence on insect pollinators (%)", "Dependence on wind (%)", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+nom_traits <- data.frame(traits,trait_names)
+
+# For the "461 species dataset":
+# We indicate the list of trait to test, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+# We test the effect of each trait:
+total_output_list_461 <- pmap(
+  list(trait = traits, trait_name = trait_names), # we indicate the name of traits to test and their "cleaned" name
+  ~ model_function( # we apply the function to each trait
+    trait = ..1,
+    dataset = select_df[!select_df$Species%in%c("Ceratochloa cathartica",
+                                                "Persicaria hydropiper"),], # dataset without outliers
+    dataset_name = "461 species", # specify the name of the dataset you are working on
+    trait_name = ..2,
+    add_weight = FALSE, # FALSE if we don't want to take weight into account in the model
+    check_homo = TRUE # TRUE if we want to check for homogeneity
+  )
+)
+
+all_anova_461_C3 <- map_dfr(total_output_list_461, "anova")
+all_anova_461_C3 <- all_anova_461_C3[all_anova_461_C3$Term!="Residuals",]
+
+all_contrasts_461_C3 <- map_dfr(total_output_list_461, "contrasts")
+all_contrasts_461_C3$Signif <- ifelse(all_contrasts_461_C3$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_461_C3 <- all_contrasts_461_C3 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_461_C3 <- merge(all_contrasts_461_C3, nom_traits, by.x="term", 
+                              by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_461_C3 <- all_contrasts_461_C3 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_461_C3$term <- all_contrasts_461_C3$trait_names
+all_contrasts_461_C3$trait_names <- NULL
+
+
+# Total dataset
+
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+
+total_output_list_total <- pmap(
+  list(trait = traits, trait_name = trait_names),
+  ~ model_function(
+    trait = ..1,
+    dataset = sp_data[!sp_data$Species%in%c("Ceratochloa cathartica","Galium album"),],
+    dataset_name = "562 species",
+    trait_name = ..2,
+    add_weight = FALSE,
+    check_homo = TRUE
+  )
+)
+
+all_anova_total_C3 <- map_dfr(total_output_list_total, "anova")
+all_anova_total_C3<- all_anova_total_C3[all_anova_total_C3$Term!="Residuals",]
+
+all_contrasts_total_C3 <- map_dfr(total_output_list_total, "contrasts")
+all_contrasts_total_C3$Signif <- ifelse(all_contrasts_total_C3$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_total_C3 <- all_contrasts_total_C3 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_total_C3 <- merge(all_contrasts_total_C3, nom_traits, by.x="term", 
+                                by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_total_C3 <- all_contrasts_total_C3 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_total_C3$term <- all_contrasts_total_C3$trait_names
+all_contrasts_total_C3$trait_names <- NULL
+
+# Big table
+rm(big_table_C3)
+
+big_table_C3 <- rbind(all_anova_total_C3, all_anova_461_C3)
+big_table_C3 <- merge(big_table_C3, nom_traits, by.x="Term", by.y="traits", all.x=TRUE, all.y=FALSE)
+
+big_table_C3 <- big_table_C3 %>%
+  mutate(
+    Term = factor(Term, levels = c("Pct_insect_dep_sc", "Pct_wind_dep_sc", 
+                                   "Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+    Dataset = factor(Dataset, levels = c("562 species", "461 species"))
+    ) %>%
+  arrange(Term, Dataset)
+
+big_table_C3$Term <- big_table_C3$trait_names
+big_table_C3$trait_names <- NULL
+
+big_table_C3 <- subset(big_table_C3, !(big_table_C3$Term=="Nectar quantity" 
+                                       & big_table_C3$Dataset=="Total"))
+
+big_table_C3 <- big_table_C3 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+```
+
+```{r Results without weigth and without outliers, echo=TRUE, include=TRUE}
+# To display tables : 
+# Anova table
+knitr::kable(big_table_C3, "latex", 
+             caption = "Analysis of variance (ANOVA) table comparing the temporal trends in species abundance across traits, for the dataset of plant species with floral traits information (562 species) and for the subset of plant species with a pollination syndrome (461 species)", booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+# Emmeans tables
+knitr::kable(all_contrasts_461_C3, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 461 species dataset", 
+             booktabs = T) %>%
+   kable_styling(latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+knitr::kable(all_contrasts_total_C3, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 562 species dataset", 
+             booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+```
+
+#### Appendix - Case 4: without weighting and with outliers
+
+```{r without weigth and with outliers, echo=FALSE, include=FALSE}
+# We create a data.frame with the the list of traits, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty") 
+trait_names <- c("Dependence on insect pollinators (%)", "Dependence on wind (%)", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+nom_traits <- data.frame(traits,trait_names)
+
+# For the "461 species dataset":
+# We indicate the list of trait to test, and their final name for the table:
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+# We test the effect of each trait:
+total_output_list_461 <- pmap(
+  list(trait = traits, trait_name = trait_names), # we indicate the name of traits to test and their "cleaned" name
+  ~ model_function( # we apply the function to each trait
+    trait = ..1,
+    dataset = select_df, # dataset with outliers
+    dataset_name = "461 species", # specify the name of the dataset you are working on
+    trait_name = ..2,
+    add_weight = FALSE, #  FALSE if we don't want to take weight into account in the model
+    check_homo = FALSE # TRUE if we want to check for homogeneity
+  )
+)
+
+all_anova_461_C4 <- map_dfr(total_output_list_461, "anova")
+all_anova_461_C4 <- all_anova_461_C4[all_anova_461_C4$Term!="Residuals",]
+
+all_contrasts_461_C4 <- map_dfr(total_output_list_461, "contrasts")
+all_contrasts_461_C4$Signif <- ifelse(all_contrasts_461_C4$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_461_C4 <- all_contrasts_461_C4 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_461_C4 <- merge(all_contrasts_461_C4, nom_traits, by.x="term", 
+                              by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_461_C4 <- all_contrasts_461_C4 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_461_C4$term <- all_contrasts_461_C4$trait_names
+all_contrasts_461_C4$trait_names <- NULL
+
+
+# Total dataset
+
+traits <- c("Pct_insect_dep_sc", "Pct_wind_dep_sc", "Pollination", 
+            "Flower_colour", "Flower_shape", "Nectar_qty")
+trait_names <- c("Dependence on insect pollinators", "Dependence on wind", 
+                 "Main pollination vector", "Flower colour", "Flower shape", "Nectar quantity")
+
+
+total_output_list_total <- pmap(
+  list(trait = traits, trait_name = trait_names),
+  ~ model_function(
+    trait = ..1,
+    dataset = sp_data,
+    dataset_name = "562 species",
+    trait_name = ..2,
+    add_weight = FALSE,
+    check_homo = FALSE
+  )
+)
+
+all_anova_total_C4 <- map_dfr(total_output_list_total, "anova")
+all_anova_total_C4<- all_anova_total_C4[all_anova_total_C4$Term!="Residuals",]
+
+all_contrasts_total_C4 <- map_dfr(total_output_list_total, "contrasts")
+all_contrasts_total_C4$Signif <- ifelse(all_contrasts_total_C4$adj.p.value<0.05, "S", "NS")
+
+all_contrasts_total_C4 <- all_contrasts_total_C4 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+all_contrasts_total_C4 <- merge(all_contrasts_total_C4, nom_traits, by.x="term", 
+                                by.y="traits", all.x=TRUE, all.y=FALSE)
+all_contrasts_total_C4 <- all_contrasts_total_C4 %>%
+  mutate(
+    Term = factor(term, levels = c("Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+  ) %>%
+  arrange(term)
+
+all_contrasts_total_C4$term <- all_contrasts_total_C4$trait_names
+all_contrasts_total_C4$trait_names <- NULL
+
+# Big table
+rm(big_table_C4)
+
+big_table_C4 <- rbind(all_anova_total_C4, all_anova_461_C4)
+big_table_C4 <- merge(big_table_C4, nom_traits, by.x="Term", by.y="traits", all.x=TRUE, all.y=FALSE)
+
+big_table_C4 <- big_table_C4 %>%
+  mutate(
+    Term = factor(Term, levels = c("Pct_insect_dep_sc", "Pct_wind_dep_sc", 
+                                   "Pollination", "Flower_colour", "Flower_shape", "Nectar_qty")),
+    Dataset = factor(Dataset, levels = c("562 species", "461 species"))
+    ) %>%
+  arrange(Term, Dataset)
+
+big_table_C4$Term <- big_table_C4$trait_names
+big_table_C4$trait_names <- NULL
+
+big_table_C4 <- subset(big_table_C4, !(big_table_C4$Term=="Nectar quantity" 
+                                       & big_table_C4$Dataset=="Total"))
+
+big_table_C4 <- big_table_C4 %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+```
+
+```{r Results without weigth and with outliers, echo=TRUE, include=TRUE}
+# To display tables : 
+# Anova table
+knitr::kable(big_table_C4, "latex", 
+             caption = "Analysis of variance (ANOVA) table comparing the temporal trends in species abundance across traits, for the dataset of plant species with floral traits information (562 species) and for the subset of plant species with a pollination syndrome (461 species)", booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+# Emmeans tables
+knitr::kable(all_contrasts_461_C4, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 461 species dataset", 
+             booktabs = T) %>%
+   kable_styling(latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+
+knitr::kable(all_contrasts_total_C4, "latex", 
+             caption = "Emmeans Pairwise comparisons with Holm adjustment - 562 species dataset", 
+             booktabs = T) %>%
+  kable_styling (latex_options = c("scale_down", "hold_position")) %>%
+  landscape()
+```
+
+```{r to save table, echo=FALSE, include=FALSE}
+# Appendix_8:
+Appendix_8 <- createWorkbook()
+
+addWorksheet(Appendix_8, "weight_no_outliers")
+writeData(Appendix_8, sheet = "weight_no_outliers", x = big_table_C1)
+
+addWorksheet(Appendix_8, "weight_outliers")
+writeData(Appendix_8, sheet = "weight_outliers", x = big_table_C2)
+
+addWorksheet(Appendix_8, "no_weight_no_outliers")
+writeData(Appendix_8, sheet = "no_weight_no_outliers", x = big_table_C3)
+
+addWorksheet(Appendix_8, "no_weight_outliers")
+writeData(Appendix_8, sheet = "no_weight_outliers", x = big_table_C4)
+
+saveWorkbook(Appendix_8, "Appendix_8.xlsx", overwrite = TRUE)
+
+# Appendix_9:
+Appendix_9 <- createWorkbook()
+
+addWorksheet(Appendix_9, "weight_no_outliers_461")
+writeData(Appendix_9, sheet = "weight_no_outliers_461", x = all_contrasts_461_C1)
+
+addWorksheet(Appendix_9, "weight_no_outliers_562")
+writeData(Appendix_9, sheet = "weight_no_outliers_562", x = all_contrasts_total_C1)
+
+addWorksheet(Appendix_9, "weight_outliers_461")
+writeData(Appendix_9, sheet = "weight_outliers_461", x = all_contrasts_461_C2)
+
+addWorksheet(Appendix_9, "weight_outliers_562")
+writeData(Appendix_9, sheet = "weight_outliers_562", x = all_contrasts_total_C2)
+
+addWorksheet(Appendix_9, "no_weight_no_outliers_461")
+writeData(Appendix_9, sheet = "no_weight_no_outliers_461", x = all_contrasts_461_C3)
+
+addWorksheet(Appendix_9, "no_weight_no_outliers_562")
+writeData(Appendix_9, sheet = "no_weight_no_outliers_562", x = all_contrasts_total_C3)
+
+addWorksheet(Appendix_9, "no_weight_outliers_461")
+writeData(Appendix_9, sheet = "no_weight_outliers_461", x = all_contrasts_461_C4)
+
+addWorksheet(Appendix_9, "no_weight_outliers_562")
+writeData(Appendix_9, sheet = "no_weight_outliers_562", x = all_contrasts_total_C4)
+
+saveWorkbook(Appendix_9, "Appendix_9.xlsx", overwrite = TRUE)
+
+```
